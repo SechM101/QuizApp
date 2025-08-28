@@ -1,166 +1,256 @@
-import time, random, math
-import streamlit as st
-from streamlit_autorefresh import st_autorefresh
-from supabase import create_client, Client
+# app.py
+import os
 from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
-# ---------- Config ----------
-st.set_page_config(page_title="IFRS Quiz", page_icon="📚", layout="centered")
+import streamlit as st
+from supabase import create_client, Client
+from dotenv import load_dotenv
 
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-DEFAULT_TIME_LIMIT = int(st.secrets.get("TIME_LIMIT_SECONDS", 120))
+load_dotenv()
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+assert SUPABASE_URL and SUPABASE_ANON_KEY, "Set SUPABASE_URL and SUPABASE_ANON_KEY in .env"
 
-# ---------- UI: Header ----------
-st.title("📚 IFRS Knowledge Quiz")
-st.caption("Topics: IFRS 15, IFRS 16 (Leases), Accounting Policies")
+def sb_client() -> Client:
+    client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    # restore session if we have tokens
+    if "session" in st.session_state:
+        sess = st.session_state["session"]
+        client.auth.set_session(sess["access_token"], sess["refresh_token"])
+    return client
 
-# ---------- Inputs ----------
-user_email = st.text_input("Your email (to track attempts)", value="", help="Optional for MVP; add Supabase Auth later for verified identity.")
+st.set_page_config(page_title="Timed Quiz", page_icon="⏱️", layout="wide")
 
-topics = st.multiselect(
-    "Choose topics",
-    options=["IFRS 15", "IFRS 16", "Accounting Policies"],
-    default=["IFRS 15", "IFRS 16", "Accounting Policies"]
-)
-
-num_q = st.slider("Number of questions", min_value=3, max_value=20, value=5, step=1)
-time_limit = st.slider("Time limit (seconds)", min_value=30, max_value=900, value=DEFAULT_TIME_LIMIT, step=30)
-
-# ---------- Session State ----------
-if "quiz_started" not in st.session_state:
-    st.session_state.quiz_started = False
-if "questions" not in st.session_state:
-    st.session_state.questions = []
-if "deadline" not in st.session_state:
-    st.session_state.deadline = None
-if "answers" not in st.session_state:
-    st.session_state.answers = {}  # q_index -> chosen option
-if "submitted" not in st.session_state:
-    st.session_state.submitted = False
-if "duration_sec" not in st.session_state:
-    st.session_state.duration_sec = 0
-
-def start_quiz():
-    if not topics:
-        st.warning("Please select at least one topic.")
+# ------------------------- Auth UI -------------------------
+def auth_ui(client: Client):
+    st.sidebar.header("Account")
+    if st.session_state.get("user"):
+        user = st.session_state["user"]
+        st.sidebar.success(f"Signed in as {user['email']}")
+        if st.sidebar.button("Sign out"):
+            client.auth.sign_out()
+            for k in ["user", "session", "attempt", "answers", "results"]:
+                st.session_state.pop(k, None)
+            st.rerun()
         return
-    # fetch questions from Supabase
-    resp = supabase.table("questions").select("*").in_("topic", topics).execute()
-    rows = resp.data or []
-    if not rows:
-        st.error("No questions found for selected topics.")
+
+    tab_login, tab_signup = st.sidebar.tabs(["Login", "Sign up"])
+    with tab_login:
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login"):
+            try:
+                res = client.auth.sign_in_with_password({"email": email, "password": password})
+                st.session_state["session"] = {
+                    "access_token": res.session.access_token,
+                    "refresh_token": res.session.refresh_token,
+                }
+                st.session_state["user"] = {"id": res.user.id, "email": res.user.email}
+                st.success("Logged in")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+    with tab_signup:
+        email2 = st.text_input("Email ", key="signup_email")
+        pw1 = st.text_input("Password ", type="password", key="signup_pw1")
+        pw2 = st.text_input("Confirm Password", type="password", key="signup_pw2")
+        if st.button("Create account"):
+            if not email2 or not pw1 or pw1 != pw2:
+                st.error("Please fill all fields and ensure passwords match.")
+            else:
+                try:
+                    client.auth.sign_up({"email": email2, "password": pw1})
+                    st.success("Account created. Please login.")
+                except Exception as e:
+                    st.error(f"Sign up failed: {e}")
+
+# ------------------------- Data helpers -------------------------
+def list_quizzes(client: Client):
+    res = client.table("quizzes").select("id,title,description,time_limit_seconds").eq("is_published", True).order("created_at").execute()
+    return res.data or []
+
+def fetch_quiz_bundle(client: Client, quiz_id: str):
+    qs = client.table("questions").select("id,body,explanation,position").eq("quiz_id", quiz_id).order("position").execute().data
+    qids = [q["id"] for q in qs]
+    ch = []
+    if qids:
+        ch = client.table("choices").select("id,question_id,body").in_("question_id", qids).execute().data
+    choices_by_q = {}
+    for c in ch:
+        choices_by_q.setdefault(c["question_id"], []).append(c)
+    return qs, choices_by_q
+
+def rpc_start_attempt(client: Client, quiz_id: str):
+    res = client.rpc("start_attempt", {"p_quiz_id": quiz_id}).execute()
+    if not res.data:
+        raise RuntimeError("Failed to start attempt")
+    row = res.data[0]
+    return row["attempt_id"], row["started_at"], row["ends_at"]
+
+def rpc_finish_attempt(client: Client, attempt_id: str, answers: List[Dict]):
+    res = client.rpc("finish_attempt", {"p_attempt_id": attempt_id, "p_answers": answers}).execute()
+    return res.data
+
+def rpc_get_results(client: Client, attempt_id: str):
+    return client.rpc("get_results", {"p_attempt_id": attempt_id}).execute().data
+
+# ------------------------- Timer helpers -------------------------
+def utcnow():
+    return datetime.now(timezone.utc)
+
+def seconds_left(ends_at_iso: str) -> int:
+    ends = datetime.fromisoformat(ends_at_iso.replace("Z","+00:00"))
+    remaining = (ends - utcnow()).total_seconds()
+    return max(0, int(remaining))
+
+# ------------------------- UI -------------------------
+def render_quiz(client: Client):
+    st.title("⏱️ Timed Quiz")
+
+    # Require auth
+    if not st.session_state.get("user"):
+        st.info("Please login on the left to take a quiz.")
         return
-    sample_size = min(num_q, len(rows))
-    sample = random.sample(rows, sample_size)
 
-    st.session_state.questions = sample
-    st.session_state.answers = {}
-    st.session_state.quiz_started = True
-    st.session_state.submitted = False
-    now = time.time()
-    st.session_state.deadline = now + time_limit
-    st.session_state.duration_sec = 0
+    # Choose or show current attempt
+    quizzes = list_quizzes(client)
+    if not quizzes:
+        st.warning("No published quizzes yet.")
+        return
 
-if st.button("Start / Reset Quiz"):
-    start_quiz()
+    if "attempt" not in st.session_state:
+        # Selection
+        q_options = {f"{q['title']} ({q['time_limit_seconds']}s)": q["id"] for q in quizzes}
+        label = st.selectbox("Choose a quiz", list(q_options.keys()))
+        if st.button("Start quiz"):
+            quiz_id = q_options[label]
+            try:
+                attempt_id, started, ends = rpc_start_attempt(client, quiz_id)
+                st.session_state["attempt"] = {
+                    "id": attempt_id,
+                    "quiz_id": quiz_id,
+                    "started_at": started,
+                    "ends_at": ends,
+                    "submitted": False
+                }
+                st.session_state["answers"] = {}  # question_id -> choice_id
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not start attempt: {e}")
+        return
 
-if not st.session_state.quiz_started:
-    st.info("Click **Start / Reset Quiz** to begin.")
-    st.stop()
+    # Active attempt
+    attempt = st.session_state["attempt"]
+    left_col, right_col = st.columns([2,1])
 
-# ---------- Timer (auto-refresh every 1s) ----------
-st_autorefresh(interval=1000, key="tick")  # rerun every second
+    with right_col:
+        # Timer (server-authoritative end time)
+        remaining = seconds_left(attempt["ends_at"])
+        m, s = divmod(remaining, 60)
+        st.metric("Time left", f"{m:02d}:{s:02d}")
+        # Rerun every 1s while quiz is in progress and not submitted
+        if not attempt["submitted"]:
+            st.autorefresh(interval=1000, key="tick")
 
-remaining = max(0, int(st.session_state.deadline - time.time()))
-elapsed = time_limit - remaining
-st.session_state.duration_sec = elapsed
+    # Fetch quiz content once per run
+    qs, choices_by_q = fetch_quiz_bundle(client, attempt["quiz_id"])
 
-# Visual timer
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("Time remaining (sec)", remaining)
-with col2:
-    st.progress(remaining / time_limit)
+    with left_col:
+        st.subheader("Answer all questions")
+        # Render choices (all-on-one-page)
+        for q in qs:
+            qid = q["id"]
+            st.write(f"**Q{q['position']}. {q['body']}**")
+            # choices radios
+            options = choices_by_q.get(qid, [])
+            # create a mapping body->id for display
+            labels = {c["body"]: c["id"] for c in options}
+            current_choice = None
+            if qid in st.session_state["answers"]:
+                # find label by id
+                for k,v in labels.items():
+                    if v == st.session_state["answers"][qid]:
+                        current_choice = k
+                        break
+            choice_label = st.radio(
+                " ",
+                options=list(labels.keys()),
+                index=(list(labels.keys()).index(current_choice) if current_choice in labels else 0),
+                key=f"radio_{qid}"
+            )
+            st.session_state["answers"][qid] = labels[choice_label]
+            st.divider()
 
-if remaining <= 0 and not st.session_state.submitted:
-    st.warning("⏰ Time's up! Auto-submitting your answers...")
-    st.session_state.submitted = True
+        # Submit handlers
+        col1, col2 = st.columns([1,4])
+        with col1:
+            disabled = attempt["submitted"] or remaining == 0
+            if st.button("Submit now", type="primary", disabled=disabled):
+                do_submit(client)
 
-# ---------- Render questions ----------
-st.subheader("Questions")
-for idx, q in enumerate(st.session_state.questions):
-    st.markdown(f"**{idx+1}. {q['text']}**")
-    choices = q["choices"]
-    # preserve a stable shuffle per session
-    rnd = random.Random(str(q["id"]))
-    shuffled = choices[:]
-    rnd.shuffle(shuffled)
+    # Autosubmit when timer hits zero
+    if remaining == 0 and not attempt["submitted"]:
+        st.warning("Time is up! Submitting your answers…")
+        do_submit(client)
 
-    def on_change(i=idx):
-        st.session_state.answers[i] = st.session_state.get(f"sel_{i}")
+    # Results view (after submit)
+    if attempt["submitted"]:
+        results = st.session_state.get("results", [])
+        if not results:
+            # fallback: fetch results
+            try:
+                results = rpc_get_results(client, attempt["id"])
+                st.session_state["results"] = results
+            except Exception as e:
+                st.error(f"Failed to fetch results: {e}")
+                return
 
-    st.radio(
-        "Select one:",
-        options=shuffled,
-        key=f"sel_{idx}",
-        index=None if idx not in st.session_state.answers else shuffled.index(st.session_state.answers[idx]),
-        on_change=on_change
-    )
-    st.divider()
+        # Compute score locally for display (server already set score)
+        score = sum(1 for r in results if r["is_correct"])
+        st.success(f"Your score: {score} / {len(results)}")
 
-# ---------- Submit button (or auto-submission on timeout) ----------
-if st.button("Submit Answers") and not st.session_state.submitted:
-    st.session_state.submitted = True
+        for r in results:
+            st.write(f"**Question**: {r['question_id']}")
+            st.write(f"- Your answer: `{r['chosen_choice_id']}`")
+            st.write(f"- Correct answer: `{r['correct_choice_id']}`")
+            st.write(f"- Correct? {'✅' if r['is_correct'] else '❌'}")
+            if r.get("explanation"):
+                with st.expander("Explanation"):
+                    st.write(r["explanation"])
 
-if not st.session_state.submitted:
-    st.stop()
+def do_submit(client: Client):
+    """Submit answers atomically via RPC. Protects against double submits."""
+    attempt = st.session_state["attempt"]
+    if attempt["submitted"]:
+        return
+    # build answers array for RPC
+    answers = []
+    for qid, cid in (st.session_state.get("answers") or {}).items():
+        answers.append({"question_id": qid, "chosen_choice_id": cid})
 
-# ---------- Scoring & Feedback ----------
-details = []
-correct_count = 0
-for idx, q in enumerate(st.session_state.questions):
-    chosen = st.session_state.answers.get(idx, None)
-    is_correct = (chosen == q["answer"])
-    if is_correct:
-        correct_count += 1
-    details.append({
-        "question_id": q["id"],
-        "topic": q["topic"],
-        "question": q["text"],
-        "chosen": chosen,
-        "correct_answer": q["answer"],
-        "correct": is_correct,
-        "explanation": q.get("explanation") or ""
-    })
+    try:
+        data = rpc_finish_attempt(client, attempt["id"], answers)
+        st.session_state["results"] = data
+        attempt["submitted"] = True
+        st.session_state["attempt"] = attempt
+        st.success("Submitted!")
+        st.rerun()
+    except Exception as e:
+        msg = str(e)
+        if "already finished" in msg:
+            # benign race: one of the paths finished first
+            attempt["submitted"] = True
+            st.session_state["attempt"] = attempt
+            st.info("Attempt was already finished.")
+            st.rerun()
+        else:
+            st.error(f"Submit failed: {e}")
 
-total = len(st.session_state.questions)
-score_pct = round((correct_count / total) * 100, 1)
+# ------------------------- Main -------------------------
+client = sb_client()
+auth_ui(client)
+render_quiz(client)
 
-# Store in Supabase
-result_doc = {
-    "user_email": user_email or None,
-    "topics": [q["topic"] for q in st.session_state.questions],
-    "total": total,
-    "correct": correct_count,
-    "score_pct": score_pct,
-    "answers": details,
-    "duration_sec": int(st.session_state.duration_sec)
-}
-supabase.table("quiz_results").insert(result_doc).execute()
-
-# Show summary
-st.success(f"Score: {correct_count}/{total} ({score_pct}%). Time taken: {int(st.session_state.duration_sec)} sec")
-
-# Show per-question feedback (what was wrong + correct answer)
-st.subheader("Your answers & explanations")
-for d in details:
-    icon = "✅" if d["correct"] else "❌"
-    st.markdown(f"{icon} **Q:** {d['question']}")
-    st.write(f"- **Your answer:** {d['chosen']}")
-    st.write(f"- **Correct answer:** {d['correct_answer']}")
-    if d["explanation"]:
-        st.write(f"- _Why:_ {d['explanation']}")
-    st.write("---")
