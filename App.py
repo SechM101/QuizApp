@@ -76,48 +76,53 @@ def list_quizzes(client: Client):
 
 # 1) Update the bundle fetch to log what came back
 def fetch_quiz_bundle(client: Client, quiz_id: str):
-    qsel = client.table("questions").select("id,body,explanation,position").eq("quiz_id", quiz_id).order("position")
-    # If you renamed the column to display_order, use:
-    # qsel = client.table("questions").select("id,body,explanation,display_order").eq("quiz_id", quiz_id).order("display_order")
-    qres = qsel.execute()
-    qs = qres.data or []
+    """Return (questions, choices_by_question) or ([], {}) on any issue."""
+    try:
+        # If you renamed `position` -> `display_order`, switch both .select/.order lines accordingly.
+        qres = client.table("questions")\
+            .select("id,body,explanation,position")\
+            .eq("quiz_id", quiz_id)\
+            .order("position")\
+            .execute()
+    except Exception as e:
+        st.error(f"Failed to load questions: {e}")
+        return [], {}
+
+    qs = qres.data or []  # ensure list
     if not qs:
-        st.warning("No questions loaded. If this is unexpected, check RLS policies and seed data.")
+        # Gentle hint to check RLS/seed
+        with st.expander("Debug (questions)"):
+            st.write({"quiz_id": quiz_id, "questions_count": 0})
         return [], {}
 
     qids = [q["id"] for q in qs]
-    cres = client.table("choices").select("id,question_id,body").in_("question_id", qids).execute()
-    ch = cres.data or []
+    try:
+        cres = client.table("choices")\
+            .select("id,question_id,body")\
+            .in_("question_id", qids)\
+            .execute()
+        ch = cres.data or []
+    except Exception as e:
+        st.error(f"Failed to load choices: {e}")
+        return qs, {}
+
     choices_by_q = {}
     for c in ch:
         choices_by_q.setdefault(c["question_id"], []).append(c)
 
-    # Optional debug: show counts in an expander
-    with st.expander("Debug: data loaded", expanded=False):
+    # Optional quick debug
+    with st.expander("Debug (loaded)"):
         st.write({"questions": len(qs), "choices": len(ch)})
-    return qs, choices_by_q
 
-# 2) When rendering, handle "no choices" gracefully instead of silently skipping
-for q in qs:
-    qid = q["id"]
-    st.write(f"**Q{q.get('position', q.get('display_order', '?'))}. {q['body']}**")
-    options = choices_by_q.get(qid, [])
-    if not options:
-        st.info("No choices configured for this question (admin needs to add choices).")
-        continue
-    labels = {c["body"]: c["id"] for c in options}
-    current_choice = None
-    if qid in st.session_state["answers"]:
-        for k,v in labels.items():
-            if v == st.session_state["answers"][qid]:
-                current_choice = k
-                break
-    # Important: avoid index error if current_choice is None
-    keys_list = list(labels.keys())
-    idx = keys_list.index(current_choice) if current_choice in labels else 0
-    choice_label = st.radio(" ", options=keys_list, index=idx, key=f"radio_{qid}")
-    st.session_state["answers"][qid] = labels[choice_label]
-    st.divider()
+    return qs, choices_by_q
+    qs, choices_by_q = fetch_quiz_bundle(client, attempt["quiz_id"])
+
+    if not qs:
+        st.info("No questions are available for this quiz (or you don’t have access). "
+            "Check that the quiz is published, RLS policies allow read, and seed data exists.")
+        return
+
+
 
 def rpc_start_attempt(client: Client, quiz_id: str):
     res = client.rpc("start_attempt", {"p_quiz_id": quiz_id}).execute()
