@@ -274,9 +274,9 @@ def render_quiz(client: Client):
     with colA:
         if st.button("🔁 Take this quiz again"):
         # clear local state so we show the quiz picker
-        for k in ["attempt", "answers", "results"]:
-            st.session_state.pop(k, None)
-        st.rerun()
+            for k in ["attempt", "answers", "results"]:
+                st.session_state.pop(k, None)
+            st.rerun()
     with colB:
         if st.button("🏁 Back to quiz list"):
             for k in ["attempt", "answers", "results"]:
