@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import streamlit as st
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from streamlit.autorefresh import st.autorefresh
 
 load_dotenv()
 
@@ -152,8 +153,10 @@ def render_quiz(client: Client):
         m, s = divmod(remaining, 60)
         st.metric("Time left", f"{m:02d}:{s:02d}")
         # Rerun every 1s while quiz is in progress and not submitted
-        if not attempt["submitted"]:
-            st.autorefresh(interval=1000, key="tick")
+        # where you currently do: st.autorefresh(interval=1000, key="tick")
+        if not attempt["submitted"] and remaining > 0:
+        # unique key per attempt avoids stale refresh behavior if user restarts a quiz
+            st.autorefresh(interval=1000, key=f"tick-{attempt['id']}")
 
     # Fetch quiz content once per run
     qs, choices_by_q = fetch_quiz_bundle(client, attempt["quiz_id"])
