@@ -103,10 +103,23 @@ def rpc_get_results(client: Client, attempt_id: str):
 def utcnow():
     return datetime.now(timezone.utc)
 
-def seconds_left(ends_at_iso: str) -> int:
-    ends = datetime.fromisoformat(ends_at_iso.replace("Z","+00:00"))
-    remaining = (ends - utcnow()).total_seconds()
-    return max(0, int(remaining))
+def seconds_left(ends_at_val) -> int:
+    """Compute remaining seconds to a server-provided ISO timestamp."""
+    try:
+        if isinstance(ends_at_val, str):
+            s = ends_at_val.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)  # supports ' ' or 'T'
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        elif isinstance(ends_at_val, datetime):
+            dt = ends_at_val if ends_at_val.tzinfo else ends_at_val.replace(tzinfo=timezone.utc)
+        else:
+            return 0
+        remaining = (dt - datetime.now(timezone.utc)).total_seconds()
+        return max(0, int(remaining))
+    except Exception:
+        return 0
+
 
 # ------------------------- UI -------------------------
 def render_quiz(client: Client):
