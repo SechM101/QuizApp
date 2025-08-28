@@ -157,8 +157,6 @@ def render_quiz(client: Client):
         if not attempt["submitted"] and remaining > 0:
         # unique key per attempt avoids stale refresh behavior if user restarts a quiz
             st_autorefresh(interval=1000, key=f"tick-{attempt['id']}")
-        if not attempt["submitted"]:
-            st.autorefresh(interval=1000, key="tick")
 
 
     # Fetch quiz content once per run
