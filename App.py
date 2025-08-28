@@ -268,6 +268,21 @@ def render_quiz(client: Client):
                 st.error(f"Failed to fetch results: {e}")
                 return
 
+    # After results are shown
+    colA, colB = st.columns(2)
+        with colA:
+            if st.button("🔁 Take this quiz again"):
+            # clear local state so we show the quiz picker
+            for k in ["attempt", "answers", "results"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+    with colB:
+        if st.button("🏁 Back to quiz list"):
+            for k in ["attempt", "answers", "results"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+
         # Compute score locally for display (server already set score)
         score = sum(1 for r in results if r["is_correct"])
         st.success(f"Your score: {score} / {len(results)}")
