@@ -1,6 +1,7 @@
 # app.py
 import os
 from datetime import datetime, timezone
+import time
 from typing import Dict, List, Optional
 
 import streamlit as st
@@ -157,6 +158,9 @@ def render_quiz(client: Client):
         if not attempt["submitted"] and remaining > 0:
         # unique key per attempt avoids stale refresh behavior if user restarts a quiz
             st_autorefresh(interval=1000, key=f"tick-{attempt['id']}")
+        if not attempt["submitted"] and remaining > 0:
+            time.sleep(1)
+            st.experimental_rerun()
 
 
     # Fetch quiz content once per run
