@@ -271,7 +271,7 @@ def render_quiz(client: Client):
 
     # After results are shown
     colA, colB = st.columns(2)
-        with colA:
+    with colA:
             if st.button("🔁 Take this quiz again"):
             # clear local state so we show the quiz picker
             for k in ["attempt", "answers", "results"]:
