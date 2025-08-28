@@ -169,32 +169,33 @@ def render_quiz(client: Client):
         st.info("Please login on the left to take a quiz.")
         return
 
-    # Choose or show current attempt
-    quizzes = list_quizzes(client)
-    if not quizzes:
-        st.warning("No published quizzes yet.")
+        # Choose or show current attempt
+        quizzes = list_quizzes(client)
+        if not quizzes:
+            st.warning("No published quizzes yet.")
         return
 
-    if "attempt" not in st.session_state:
+        if "attempt" not in st.session_state:
         # Selection
-        q_options = {f"{q['title']} ({q['time_limit_seconds']}s)": q["id"] for q in quizzes}
-        label = st.selectbox("Choose a quiz", list(q_options.keys()))
+            q_options = {f"{q['title']} ({q['time_limit_seconds']}s)": q["id"] for q in quizzes}
+            label = st.selectbox("Choose a quiz", list(q_options.keys()))
         if st.button("Start quiz"):
-            quiz_id = q_options[label]
-            try:
-                attempt_id, started, ends = rpc_start_attempt(client, quiz_id)
-                st.session_state["attempt"] = {
-                    "id": attempt_id,
-                    "quiz_id": quiz_id,
-                    "started_at": started,
-                    "ends_at": ends,
-                    "submitted": False
-                }
-                st.session_state["answers"] = {}  # question_id -> choice_id
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not start attempt: {e}")
-        return
+        # defensive cleanup
+        for k in ["attempt", "answers", "results"]:
+            st.session_state.pop(k, None)
+        try:
+            attempt_id, started, ends = rpc_start_attempt(client, quiz_id)
+            st.session_state["attempt"] = {
+                "id": attempt_id,
+                "quiz_id": quiz_id,
+                "started_at": started,
+                "ends_at": ends,
+                "submitted": False
+        }
+            st.session_state["answers"] = {}
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not start attempt: {e}")
 
     # Active attempt
     attempt = st.session_state["attempt"]
